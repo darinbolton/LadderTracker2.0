@@ -1,0 +1,73 @@
+services:
+
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: laddertracker-sql
+    restart: unless-stopped
+    environment:
+      ACCEPT_EULA: "Y"
+      SA_PASSWORD: ${SA_PASSWORD}
+      MSSQL_PID: Express
+    volumes:
+      - sqldata:/var/opt/mssql
+    healthcheck:
+      test: ["CMD", "/opt/mssql-tools18/bin/sqlcmd", "-S", "localhost", "-U", "sa", "-P", "${SA_PASSWORD}", "-C", "-Q", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  laddertracker:
+    image: laddertracker-app:latest
+    pull_policy: never
+    container_name: laddertracker-app
+    restart: unless-stopped
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+    environment:
+      SQL_SERVER: sqlserver
+      DISCORD_WEBHOOK: ${DISCORD_WEBHOOK}
+      SQL_USER: ${SQL_USER}
+      SQL_PASS: ${SQL_PASS}
+      RUN_HOUR: ${RUN_HOUR}
+      TILT_THRESHOLD: ${TILT_THRESHOLD}
+      WEEKLY_DAY: ${WEEKLY_DAY}
+      MATCH_LIMIT: ${MATCH_LIMIT}
+    volumes:
+      - /opt/laddertracker/data:/data
+
+  bot:
+    image: laddertracker-bot:latest
+    pull_policy: never
+    container_name: laddertracker-bot
+    restart: unless-stopped
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+    environment:
+      SQL_SERVER: sqlserver
+      DISCORD_TOKEN: ${DISCORD_TOKEN}
+      DISCORD_GUILD_ID: ${DISCORD_GUILD_ID}
+      ADMIN_ROLE_NAME: ${ADMIN_ROLE_NAME}
+      SQL_USER: ${SQL_USER}
+      SQL_PASS: ${SQL_PASS}
+
+  nginx:
+    image: nginx:alpine
+    container_name: laddertracker-web
+    restart: unless-stopped
+    ports:
+      - "8090:80"
+    volumes:
+      - /opt/laddertracker/data/web:/usr/share/nginx/html:ro
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.laddertracker-web.rule=Host(`ladder.notlobs.com`)"
+      - "traefik.http.routers.laddertracker-web.entrypoints=websecure"
+      - "traefik.http.routers.laddertracker-web.tls.certresolver=cloudflare"
+      - "traefik.http.services.laddertracker-web.loadbalancer.server.port=80"
+
+volumes:
+  sqldata:
+    name: laddertracker-sqldata
