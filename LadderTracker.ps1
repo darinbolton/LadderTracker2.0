@@ -126,7 +126,7 @@ function Send-DiscordEmbed {
         [string]$Description = '',
         [int]$Color = 5793266,
         [object[]]$Fields = @(),
-        [string]$Footer = 'Crafted by Gale for the StarCraft II Community'
+        [string]$Footer = 'This bot is hosted by and provided by Gale. If you have a feature request, feel free to reach out.'
     )
 
     # Enforce Discord character limits
