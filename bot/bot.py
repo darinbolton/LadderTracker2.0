@@ -225,6 +225,84 @@ async def sc2pulse_search(name: str, region: str = "US") -> list[dict]:
     return results
 
 
+async def sc2pulse_get_matches(nephest_id: int, region: str = "US", limit: int = 25) -> list:
+    """Fetch recent 1v1 match history for a character."""
+    url = f"{SC2PULSE_BASE}/group/match"
+    params = {
+        "typeCursor": "_1V1",
+        "mapCursor":  "0",
+        "regionCursor": region,
+        "type":       "_1V1",
+        "limit":      limit,
+        "characterId": nephest_id,
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            if resp.status != 200:
+                print(f"[Matchup] HTTP {resp.status} fetching matches for {nephest_id}")
+                return []
+            return await resp.json()
+
+
+async def sc2pulse_get_opponent_info(nephest_id: int) -> dict:
+    """Fetch name, primary race, and current MMR for an opponent character."""
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            f"{SC2PULSE_BASE}/character/{nephest_id}",
+            timeout=aiohttp.ClientTimeout(total=10)
+        ) as resp:
+            char_data = await resp.json() if resp.status == 200 else {}
+
+        async with session.get(
+            f"{SC2PULSE_BASE}/character/{nephest_id}/summary/1v1/7",
+            timeout=aiohttp.ClientTimeout(total=10)
+        ) as resp:
+            summary_data = await resp.json() if resp.status == 200 else {}
+
+    name = "Unknown"
+    if char_data and isinstance(char_data, dict):
+        raw_name = char_data.get("name") or char_data.get("tag") or "Unknown"
+        name = raw_name.split("#")[0]
+
+    race = "UNKNOWN"
+    if summary_data and isinstance(summary_data, dict):
+        race_games = summary_data.get("raceGames") or summary_data.get("RaceGames")
+        if race_games and isinstance(race_games, dict):
+            race = max(race_games, key=lambda k: race_games[k])
+
+    mmr = 0
+    if summary_data and isinstance(summary_data, dict):
+        mmr = int(summary_data.get("ratingLast") or summary_data.get("RatingLast") or 0)
+
+    return {"name": name, "race": race, "mmr": mmr}
+
+
+def get_race_abbrev(race: str) -> str:
+    return {"TERRAN": "T", "ZERG": "Z", "PROTOSS": "P", "RANDOM": "R"}.get(race.upper(), "?")
+
+
+def db_get_player_by_name(name: str) -> list:
+    """Return all active registrations matching a player name (case-insensitive)."""
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT p.LLID, p.DiscordID, p.NephestID, p.Name, p.Race, p.BattleTag, p.Region, ap.MMR "
+            "FROM Players p "
+            "LEFT JOIN AllParticipants ap ON p.LLID = ap.LLID "
+            "WHERE p.Active = 1 AND LOWER(p.Name) = LOWER(?)",
+            name
+        )
+        return cursor.fetchall()
+
+
+def db_get_unique_player_names() -> list[str]:
+    """Return distinct active player names for autocomplete."""
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT DISTINCT Name FROM Players WHERE Active = 1 ORDER BY Name")
+        return [r[0] for r in cursor.fetchall()]
+
+
 # ── Bot Setup ─────────────────────────────────────────────────────────────────
 intents = discord.Intents.default()
 bot     = commands.Bot(command_prefix="!", intents=intents)
@@ -631,6 +709,221 @@ async def list_leagues(interaction: discord.Interaction):
         color=discord.Color.blurple()
     )
     embed.set_footer(text="Use /update-league to adjust thresholds each new season.")
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+# ── /matchup ──────────────────────────────────────────────────────────────────
+async def player_name_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    try:
+        names = db_get_unique_player_names()
+    except Exception:
+        return []
+    matches = [n for n in names if current.lower() in n.lower()]
+    return [app_commands.Choice(name=n, value=n) for n in matches[:25]]
+
+
+@bot.tree.command(guild=guild, name="matchup", description="Show matchup stats for any registered player based on their last 25 games.")
+@app_commands.describe(player="Player name to look up")
+@app_commands.autocomplete(player=player_name_autocomplete)
+async def matchup(interaction: discord.Interaction, player: str):
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        rows = db_get_player_by_name(player)
+    except Exception as e:
+        await interaction.followup.send(f"Database error: `{e}`", ephemeral=True)
+        return
+
+    if not rows:
+        await interaction.followup.send(
+            f"No registered player found named **{player}**. Use `/players` to see who's registered.",
+            ephemeral=True
+        )
+        return
+
+    if len(rows) > 1:
+        # Multiple races — show a select menu
+        view = MatchupRaceSelectView(rows)
+        race_list = " | ".join(f"{RACE_EMOJI.get(r[4], '')} {r[4]}" for r in rows)
+        await interaction.followup.send(
+            f"**{player}** has multiple races tracked: {race_list}\nWhich race do you want stats for?",
+            view=view,
+            ephemeral=True
+        )
+        return
+
+    await _send_matchup_embed(interaction, rows[0])
+
+
+class MatchupRaceSelectView(discord.ui.View):
+    def __init__(self, rows):
+        super().__init__(timeout=60)
+        options = [
+            discord.SelectOption(
+                label=f"{r[4]} ({r[6]})",
+                value=r[0],  # LLID
+                emoji=RACE_EMOJI.get(r[4])
+            )
+            for r in rows
+        ]
+        self._row_map = {r[0]: r for r in rows}
+        select = discord.ui.Select(placeholder="Choose a race", options=options)
+        select.callback = self._on_select
+        self.add_item(select)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        llid = interaction.data["values"][0]
+        row  = self._row_map.get(llid)
+        if not row:
+            await interaction.response.send_message("Something went wrong. Try again.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        await _send_matchup_embed(interaction, row)
+        self.stop()
+
+
+async def _send_matchup_embed(interaction: discord.Interaction, player_row):
+    """Calculate and post matchup stats for a single player+race registration."""
+    # row: LLID, DiscordID, NephestID, Name, Race, BattleTag, Region, MMR
+    llid, discord_id, nephest_id, name, race, battletag, region, player_mmr = player_row
+    player_mmr = int(player_mmr or 0)
+
+    await interaction.followup.send(
+        f"Fetching match history for **{name}** ({race})... this may take a moment.",
+        ephemeral=True
+    )
+
+    try:
+        match_data = await sc2pulse_get_matches(nephest_id, region)
+    except Exception as e:
+        await interaction.followup.send(f"Failed to fetch match data from SC2Pulse: `{e}`", ephemeral=True)
+        return
+
+    if not match_data:
+        await interaction.followup.send(
+            f"No recent match data found for **{name}** ({race}).", ephemeral=True
+        )
+        return
+
+    player_abbrev  = get_race_abbrev(race)
+    matchup_record = {}
+    higher_w = higher_l = similar_w = similar_l = lower_w = lower_l = 0
+    opp_mmr_list   = []
+    opp_cache      = {}
+    games_analysed = 0
+
+    for i, match_obj in enumerate(match_data):
+        if i == 0:
+            print(f"[Matchup] First match_obj keys: {list(match_obj.keys()) if isinstance(match_obj, dict) else type(match_obj)}")
+            print(f"[Matchup] First match_obj sample: {str(match_obj)[:600]}")
+
+        # Actual structure:
+        # {"match": {...}, "map": {...}, "participants": [
+        #     {"participant": {"playerCharacterId": ..., "decision": ..., "ratingChange": ...},
+        #      "team": {"rating": ..., ...}},
+        #     ...
+        # ]}
+        parts = match_obj.get("participants", [])
+        if not parts or not isinstance(parts, list):
+            continue
+
+        mine = [p for p in parts if str(p.get("participant", {}).get("playerCharacterId", "")) == str(nephest_id)]
+        opps = [p for p in parts if str(p.get("participant", {}).get("playerCharacterId", "")) != str(nephest_id)]
+
+        if not mine or not opps:
+            continue
+
+        decision = (mine[0].get("participant", {}).get("decision") or "").upper()
+        is_win   = decision == "WIN"
+        opp_id   = int(opps[0].get("participant", {}).get("playerCharacterId") or 0)
+        opp_team = opps[0].get("team") or {}
+        opp_mmr_from_match = int(opp_team.get("rating") or 0)
+
+        if opp_id == 0:
+            continue
+
+        games_analysed += 1
+
+        # Look up opponent info (cached per unique opponent)
+        if opp_id not in opp_cache:
+            try:
+                await asyncio.sleep(0.15)
+                opp_cache[opp_id] = await sc2pulse_get_opponent_info(opp_id)
+            except Exception:
+                opp_cache[opp_id] = {"name": "Unknown", "race": "UNKNOWN", "mmr": opp_mmr_from_match}
+
+        # Use match-time rating from team object if available - more accurate than current MMR
+        opp        = opp_cache[opp_id]
+        opp_abbrev = get_race_abbrev(opp["race"])
+        key        = f"{player_abbrev}v{opp_abbrev}"
+
+        matchup_record.setdefault(key, [0, 0])
+        if is_win:
+            matchup_record[key][0] += 1
+        else:
+            matchup_record[key][1] += 1
+
+        # MMR bracket comparison - prefer match-time rating, fall back to current
+        opp_mmr = opp_mmr_from_match if opp_mmr_from_match > 0 else opp["mmr"]
+        if opp_mmr > 0 and player_mmr > 0:
+            opp_mmr_list.append(opp_mmr)
+            diff = opp_mmr - player_mmr
+            if diff > 100:
+                if is_win: higher_w  += 1
+                else:      higher_l  += 1
+            elif diff < -100:
+                if is_win: lower_w   += 1
+                else:      lower_l   += 1
+            else:
+                if is_win: similar_w += 1
+                else:      similar_l += 1
+
+    if games_analysed == 0:
+        await interaction.followup.send(
+            f"Could not extract match pair data for **{name}** ({race}). "
+            f"The API response structure may have changed.",
+            ephemeral=True
+        )
+        return
+
+    # Build matchup string
+    matchup_lines = []
+    for k in sorted(matchup_record):
+        w, l  = matchup_record[k]
+        total = w + l
+        pct   = round(w / total * 100) if total > 0 else 0
+        matchup_lines.append(f"**{k}**: {w}W-{l}L ({pct}%)")
+    matchup_str = " | ".join(matchup_lines) if matchup_lines else "No matchup data"
+
+    # Build MMR bracket string
+    bracket_lines = []
+    hi_total  = higher_w  + higher_l
+    sim_total = similar_w + similar_l
+    lo_total  = lower_w   + lower_l
+    if hi_total  > 0: bracket_lines.append(f"vs Higher  (>+100): {higher_w}W-{higher_l}L ({round(higher_w/hi_total*100)}%)")
+    if sim_total > 0: bracket_lines.append(f"vs Similar (±100): {similar_w}W-{similar_l}L ({round(similar_w/sim_total*100)}%)")
+    if lo_total  > 0: bracket_lines.append(f"vs Lower   (<-100): {lower_w}W-{lower_l}L ({round(lower_w/lo_total*100)}%)")
+    bracket_str = "\n".join(bracket_lines) if bracket_lines else "No MMR bracket data"
+
+    # Opponent MMR stats
+    if opp_mmr_list:
+        avg_opp = round(sum(opp_mmr_list) / len(opp_mmr_list))
+        opp_mmr_str = f"Avg: {avg_opp:,} | Highest faced: {max(opp_mmr_list):,} | Lowest faced: {min(opp_mmr_list):,}"
+    else:
+        opp_mmr_str = "N/A"
+
+    embed = discord.Embed(
+        title=f"\U0001F3AE Matchup Stats \u2014 {name} ({race})",
+        description=f"Based on **{games_analysed}** of the last 25 ladder games",
+        color=discord.Color.blurple()
+    )
+    embed.add_field(name="Matchups",     value=matchup_str,  inline=False)
+    embed.add_field(name="MMR Brackets", value=bracket_str,  inline=False)
+    embed.add_field(name="Opponent MMR", value=opp_mmr_str,  inline=False)
+    embed.set_footer(text="Crafted by Gale for the StarCraft II Community")
+
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 

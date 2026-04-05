@@ -126,44 +126,50 @@ function Send-DiscordEmbed {
         [string]$Description = '',
         [int]$Color = 5793266,
         [object[]]$Fields = @(),
-        [string]$Footer = 'Formless Bearsloths Ladder Tracker'
+        [string]$Footer = 'Crafted by Gale for the StarCraft II Community'
     )
 
     # Enforce Discord character limits
-    $safeTitle  = Limit-String $Title        -Max 256
-    $safeDesc   = Limit-String $Description  -Max 4096
-    $safeFields = @($Fields | ForEach-Object {
-        @{
-            name   = Limit-String $_.name  -Max 256
-            value  = Limit-String $_.value -Max 1024
-            inline = $_.inline
-        }
-    })
+    $safeTitle  = Limit-String $Title       -Max 256
+    $safeDesc   = Limit-String $Description -Max 4096
 
-    # Total embed length must not exceed 6000 characters
+    # Build fields as PSCustomObjects - more reliable serialization than hashtables
+    $safeFields = @(
+        ($Fields | Where-Object { $null -ne $_ }) | ForEach-Object {
+            [PSCustomObject]@{
+                name   = Limit-String ([string]$_.name)  -Max 256
+                value  = Limit-String ([string]$_.value) -Max 1024
+                inline = [bool]$_.inline
+            }
+        }
+    )
+
+    # Total embed length guard
     $totalLen = $safeTitle.Length + $safeDesc.Length +
                 ($safeFields | ForEach-Object { $_.name.Length + $_.value.Length } |
                  Measure-Object -Sum).Sum
     if ($totalLen -gt 6000) {
         $excess   = $totalLen - 5990
         $safeDesc = Limit-String $safeDesc -Max ([Math]::Max(100, $safeDesc.Length - $excess))
-        Write-Warning "Discord embed exceeded 6000 chars ($totalLen), description truncated."
+        Write-Warning "Discord embed truncated - was $totalLen chars."
     }
 
-    # Build payload - explicitly wrap fields in @() to guarantee array serialization
-    $payload = [ordered]@{
+    # Build payload using PSCustomObject throughout for predictable ConvertTo-Json output
+    $payload = [PSCustomObject]@{
         embeds = @(
-            [ordered]@{
+            [PSCustomObject]@{
                 title       = $safeTitle
                 description = $safeDesc
-                color       = $Color
-                fields      = if ($safeFields.Count -gt 0) { $safeFields } else { @() }
-                footer      = @{ text = $Footer }
+                color       = [int]$Color
+                fields      = $safeFields
+                footer      = [PSCustomObject]@{ text = $Footer }
                 timestamp   = (Get-Date -Format 'o')
             }
         )
     }
-    $body = $payload | ConvertTo-Json -Depth 10
+
+    $body = $payload | ConvertTo-Json -Depth 8
+    Write-Verbose "Discord payload ($($body.Length) chars): $($body.Substring(0, [Math]::Min(300, $body.Length)))..." -Verbose
 
     do {
         try {
@@ -621,20 +627,21 @@ function Get-LoserMessage ([string]$Name, [int]$Change, [string]$Race) {
 }
 
 function Get-ATHMessage ([string]$Name, [int]$MMR, [string]$Race) {
-    $p = "``$Name``"; $m = "``$MMR``"
+    $p = "``$Name``"; $m = "``$MMR``"; $r = "``$Race``"
     $suffix = switch ($Race) {
-        'Zerg'    { ' The swarm has never been stronger.' }
-        'Terran'  { ' Long live the Marine.' }
-        'Protoss' { ' En Taro Artanis.' }
+        'ZERG'    { ' The swarm has never been stronger.' }
+        'TERRAN'  { ' Long live the Marine.' }
+        'PROTOSS' { ' En Taro Artanis.' }
+        'RANDOM'  { ' Chaos reigns supreme.' }
         default   { '' }
     }
     return @(
-        "$eTrophy **NEW ALL-TIME HIGH!** $p just peaked at $m MMR - a personal best!$suffix",
-        "$eCrown **PEAK MMR ACHIEVED!** $p has never been this high: $m MMR!$suffix",
-        "$eParty $p just broke their personal record! $m MMR - new all-time high!$suffix",
-        "$eFire **ATH UNLOCKED:** $p is playing the best SC2 of their life right now. $m MMR.$suffix",
-        "$eBoom $p hit a new ceiling: $m MMR. Personal record shattered!$suffix",
-        "$eStar Historic session from $p. $m MMR - that's a new career high.$suffix"
+        "$eTrophy **NEW $r ALL-TIME HIGH!** $p just peaked at $m MMR - a personal best for this race!$suffix",
+        "$eCrown **PEAK $r MMR ACHIEVED!** $p has never been this high on $r`: $m MMR!$suffix",
+        "$eParty $p just broke their $r personal record! $m MMR - new all-time high!$suffix",
+        "$eFire **$r ATH UNLOCKED:** $p is playing the best $r SC2 of their life. $m MMR.$suffix",
+        "$eBoom $p hit a new $r ceiling: $m MMR. Personal record shattered!$suffix",
+        "$eStar Historic $r session from $p. $m MMR - that's a new career high for this race.$suffix"
     ) | Get-Random
 }
 
@@ -739,7 +746,9 @@ foreach ($row in $playerRows) {
         $totalGames  = ((Invoke-SC2PulseApi "$baseUrl/character/$NephestID/summary/1v1/7").Games | Measure-Object -Sum).Sum
         $athMMR      = (Invoke-SC2PulseApi "$baseUrl/character/$NephestID/summary/1v1/5000/$race").RatingMax
 
-        $last25 = (Invoke-SC2PulseApi "$baseUrl/group/match?typeCursor=_1V1&mapCursor=0&regionCursor=$region&type=_1V1&limit=$matchLimit&characterId=$NephestID").Participants.Participant |
+        $fullMatchResponse = Invoke-SC2PulseApi "$baseUrl/group/match?typeCursor=_1V1&mapCursor=0&regionCursor=$region&type=_1V1&limit=$matchLimit&characterId=$NephestID"
+
+        $last25 = $fullMatchResponse.Participants.Participant |
             Select-Object playercharacterid, decision, ratingchange |
             Where-Object { $_.PlayerCharacterID -eq $NephestID }
 
@@ -1103,7 +1112,7 @@ ORDER BY WeeklyChange DESC;
             <td class='num'>$($_.WinPercent)</td>
             <td class='num'>$($_.MaxWS)</td>
             <td class='num'>$($_.MaxLS)</td>
-            <td class='num'>$($_.RatingMax)</td>
+            <td class='num' title='$($_.Race) all-time peak'>$($_.RatingMax) <span class='muted'>($($_.Race))</span></td>
             <td class='num'>$($_.Games)</td>
         </tr>"
     }) -join "`n"
@@ -1152,7 +1161,7 @@ ORDER BY WeeklyChange DESC;
     $athPlayers = $apiResponses | Where-Object { $_.NewATH }
     if ($athPlayers) {
         $athItems = ($athPlayers | ForEach-Object {
-            "<li>$($_.Name) ($($_.Race)) hit a new all-time high of <strong>$($_.MMR) MMR</strong>!</li>"
+            "<li>$($_.Name) hit a new <strong>$($_.Race)</strong> all-time high of <strong>$($_.MMR) MMR</strong>!</li>"
         }) -join "`n"
         $athSection = "<div class='alert ath'><h3>New All-Time Highs</h3><ul>$athItems</ul></div>"
     }
@@ -1266,6 +1275,7 @@ ORDER BY WeeklyChange DESC;
             color: #fff;
             white-space: nowrap;
         }
+        .muted { color: var(--muted); font-size: 0.8em; }
         .race {
             display: inline-block;
             padding: 1px 6px;
@@ -1335,7 +1345,7 @@ ORDER BY WeeklyChange DESC;
                 <th class="num">Win %</th>
                 <th class="num">Best W Streak</th>
                 <th class="num">Best L Streak</th>
-                <th class="num">Peak MMR</th>
+                <th class="num">Peak MMR (Race)</th>
                 <th class="num">Total Games</th>
             </tr>
         </thead>
