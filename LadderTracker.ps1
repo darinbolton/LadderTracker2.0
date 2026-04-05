@@ -126,7 +126,7 @@ function Send-DiscordEmbed {
         [string]$Description = '',
         [int]$Color = 5793266,
         [object[]]$Fields = @(),
-        [string]$Footer = 'This bot is hosted by and provided by Gale. If you have a feature request, feel free to reach out.'
+        [string]$Footer = 'Crafted by Gale for the StarCraft II Community'
     )
 
     # Enforce Discord character limits
@@ -1082,13 +1082,28 @@ FROM CurrentSnap cs JOIN WeekStart ws ON cs.LLID = ws.LLID
 ORDER BY WeeklyChange DESC;
 "@)
 
-    function Get-LeagueBadge ([int]$MMR) {
-        $league = Get-League $MMR
-        return "<span class='badge' style='background:$(Get-LeagueColor $league.Color)'>$($league.Emoji) $($league.Name)</span>"
-    }
-
     function Get-LeagueColor ([int]$DecimalColor) {
         return '#{0:X6}' -f $DecimalColor
+    }
+
+    # Returns black or white text depending on badge background luminance.
+    # Uses the W3C relative luminance formula so text is always readable.
+    function Get-BadgeTextColor ([int]$DecimalColor) {
+        $r = (($DecimalColor -shr 16) -band 0xFF) / 255.0
+        $g = (($DecimalColor -shr 8)  -band 0xFF) / 255.0
+        $b = ( $DecimalColor           -band 0xFF) / 255.0
+        # Linearize sRGB channels
+        $rL = if ($r -le 0.03928) { $r / 12.92 } else { [Math]::Pow(($r + 0.055) / 1.055, 2.4) }
+        $gL = if ($g -le 0.03928) { $g / 12.92 } else { [Math]::Pow(($g + 0.055) / 1.055, 2.4) }
+        $bL = if ($b -le 0.03928) { $b / 12.92 } else { [Math]::Pow(($b + 0.055) / 1.055, 2.4) }
+        $luminance = 0.2126 * $rL + 0.7152 * $gL + 0.0722 * $bL
+        return if ($luminance -gt 0.179) { '#111111' } else { '#ffffff' }
+    }
+
+    function Get-Badge ([int]$DecimalColor, [string]$Emoji, [string]$Name) {
+        $bg   = Get-LeagueColor $DecimalColor
+        $text = Get-BadgeTextColor $DecimalColor
+        return "<span class='badge' style='background:$bg;color:$text'>$Emoji $Name</span>"
     }
 
     function Get-ChangeCell ([int]$Change) {
@@ -1099,11 +1114,10 @@ ORDER BY WeeklyChange DESC;
 
     # Leaderboard table rows
     $tableRows = ($allPlayers | ForEach-Object {
-        $league    = Get-League ([int]$_.MMR)
-        $color     = Get-LeagueColor $league.Color
-        $badge     = "<span class='badge' style='background:$color'>$($league.Emoji) $($league.Name)</span>"
+        $league     = Get-League ([int]$_.MMR)
+        $badge      = Get-Badge $league.Color $league.Emoji $league.Name
         $changeCell = Get-ChangeCell ([int]$_.Change)
-        $raceClass = $_.Race.ToLower()
+        $raceClass  = $_.Race.ToLower()
         "<tr>
             <td><span class='race $raceClass'>$($_.Race)</span> $($_.Name)</td>
             <td>$badge</td>
@@ -1125,8 +1139,7 @@ ORDER BY WeeklyChange DESC;
             $medal = switch ($rank) { 1 { '🥇' } 2 { '🥈' } 3 { '🥉' } default { $rank } }
             $changeCell = Get-ChangeCell ([int]$_.WeeklyChange)
             $league = Get-League ([int]$_.CurrentMMR)
-            $color  = Get-LeagueColor $league.Color
-            $badge  = "<span class='badge' style='background:$color'>$($league.Emoji) $($league.Name)</span>"
+            $badge  = Get-Badge $league.Color $league.Emoji $league.Name
             $rank++
             "<tr>
                 <td>$medal $($_.Name)</td>
