@@ -35,7 +35,7 @@ services:
       WEEKLY_DAY: ${WEEKLY_DAY}
       MATCH_LIMIT: ${MATCH_LIMIT}
     volumes:
-      - /opt/laddertracker/data:/data
+      - /opt/laddertracker2.0/data:/data
 
   bot:
     image: laddertracker-bot:latest
@@ -60,7 +60,7 @@ services:
     ports:
       - "8090:80"
     volumes:
-      - /opt/laddertracker/data/web:/usr/share/nginx/html:ro
+      - /opt/laddertracker2.0/data/web:/usr/share/nginx/html:ro
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.laddertracker-web.rule=Host(`ladder.notlobs.com`)"

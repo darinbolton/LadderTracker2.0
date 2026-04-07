@@ -922,21 +922,27 @@ ORDER BY COALESCE(ls.MMR, ap.MMR) DESC;
 "@)
 
 if ($allTracked.Count -gt 0) {
-    # Build fixed-width table so columns align in Discord code block
-    $header = '{0,-16} {1,-8} {2,5} {3,7} {4,7} {5,5} {6,5} {7,9} {8,10}' -f `
-        'Name','Race','MMR','PrevMMR','Change','MaxWS','MaxLS','RatingMax','WinPercent'
-    $divider = '-' * $header.Length
+    # Slim column set - keeps the table narrow enough to fit Discord's embed width
+    $header  = '{0,-15} {1,-8} {2,-5} {3,-7} {4,-6} {5,-5}' -f `
+               'Player','Race','MMR','Change','Win%','Peak'
+    $divider = '-' * 50
 
     $rows = $allTracked | ForEach-Object {
-        $changeStr = if ([int]$_.Change -gt 0) { "+$($_.Change)" } `
-                     elseif ([int]$_.Change -lt 0) { "$($_.Change)" } `
-                     else { '-' }
-        '{0,-16} {1,-8} {2,5} {3,7} {4,7} {5,5} {6,5} {7,9} {8,10}' -f `
-            $_.Name, $_.Race, $_.CurrentMMR, $_.PrevMMR, $changeStr,
-            $_.MaxWS, $_.MaxLS, $_.RatingMax, $_.WinPercent
+        $changeStr = if ([int]$_.Change -gt 0)     { "+$($_.Change)" } `
+                     elseif ([int]$_.Change -lt 0) { "$($_.Change)"  } `
+                     else                           { '-'             }
+        $name = if ($_.Name.Length -gt 14) { $_.Name.Substring(0,13) + '~' } else { $_.Name }
+        '{0,-15} {1,-8} {2,-5} {3,-7} {4,-6} {5,-5}' -f `
+            $name,
+            $_.Race.Substring(0, [Math]::Min(7, $_.Race.Length)),
+            $_.CurrentMMR,
+            $changeStr,
+            $_.WinPercent.Replace(' ','').Replace('%','') + '%',
+            $_.RatingMax
     }
 
-    $tableText  = "``````$($header)`n$($divider)`n$($rows -join "`n")``````"
+    # Triple backticks must be on their own lines for Discord to render the code block
+    $tableText  = '```' + "`n$header`n$divider`n" + ($rows -join "`n") + "`n" + '```'
     $netChange  = ($allTracked | Measure-Object -Property Change -Sum).Sum
     $boardColor = if ([int]$netChange -ge 0) { 5763719 } else { 15548997 }
 
