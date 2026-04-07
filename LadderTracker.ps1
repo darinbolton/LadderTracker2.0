@@ -1159,7 +1159,7 @@ ORDER BY WeeklyChange DESC;
         $gL = if ($g -le 0.03928) { $g / 12.92 } else { [Math]::Pow(($g + 0.055) / 1.055, 2.4) }
         $bL = if ($b -le 0.03928) { $b / 12.92 } else { [Math]::Pow(($b + 0.055) / 1.055, 2.4) }
         $luminance = 0.2126 * $rL + 0.7152 * $gL + 0.0722 * $bL
-        return if ($luminance -gt 0.179) { '#111111' } else { '#ffffff' }
+        if ($luminance -gt 0.179) { return '#111111' } else { return '#ffffff' }
     }
 
     function Get-Badge ([int]$DecimalColor, [string]$Emoji, [string]$Name) {
