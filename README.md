@@ -1,4 +1,4 @@
-# 🐻 FxB Ladder Tracker
+# Starcraft II Ladder Tracker
 
 > A fully automated StarCraft II ladder tracking system for the **Formless Bearsloths** Discord community. Tracks daily MMR changes, win rates, streaks, league promotions, and more — all delivered directly to Discord and a self-hosted web dashboard.
 
