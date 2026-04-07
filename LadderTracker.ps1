@@ -1259,10 +1259,11 @@ ORDER BY WeeklyChange DESC;
         $prevLeague = Get-League ([int]$player.PrevMMR)
         $currLeague = Get-League ([int]$player.MMR)
         if ($currLeague.Name -eq $prevLeague.Name) { continue }
-        $isPromo = [int]$player.MMR -gt [int]$player.PrevMMR
-        $arrow   = if ($isPromo) { '&#8679;' } else { '&#8681;' }
-        $cls     = if ($isPromo) { 'promo' } else { 'demo' }
-        "<li class='$cls'>$arrow $($player.Name) ($($player.Race)) $(if ($isPromo) { 'promoted to' } else { 'demoted to' }) <strong>$($currLeague.Name)</strong></li>"
+        $isPromo  = [int]$player.MMR -gt [int]$player.PrevMMR
+        $arrow    = if ($isPromo) { '&#8679;' } else { '&#8681;' }
+        $cls      = if ($isPromo) { 'promo' } else { 'demo' }
+        $verb     = if ($isPromo) { 'promoted to' } else { 'demoted to' }
+        "<li class='$cls'>$arrow $($player.Name) ($($player.Race)) $verb <strong>$($currLeague.Name)</strong></li>"
     })
     if ($leagueChanges.Count -gt 0) {
         $leagueSection = "<div class='alert league'><h3>League Changes</h3><ul>$($leagueChanges -join "`n")</ul></div>"
