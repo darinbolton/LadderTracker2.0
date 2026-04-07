@@ -737,8 +737,9 @@ foreach ($row in $playerRows) {
 
         # Skip players with no recent activity - null ratingLast means 0 games in 7 days
         if ($null -eq $mmr.ratingLast) {
+            $skipName = (Invoke-SC2PulseApi "$baseUrl/character/$NephestID").name.Split('#')[0]
             Write-Warning "[$llid] No activity in last 7 days, skipping."
-            $skippedPlayers.Add("$($llid.Split('_')[0]) ($race) - no games in 7 days")
+            $skippedPlayers.Add("$skipName ($race) - no games in 7 days")
             continue
         }
 
@@ -900,8 +901,61 @@ JOIN LadderStaging ls ON ap.LLID = ls.LLID;
 "@
 #endregion
 
-#region -- Discord: Build and Send Daily Embed ----------------------------------
-$embedFields = [System.Collections.Generic.List[object]]::new()
+#region -- Discord: Build and Send Daily Embeds ---------------------------------
+
+# ── Message 1: Plain text table (all tracked players, matches old script format)
+$allTracked = @(Invoke-Sqlcmd @sqlParams -Query @"
+SELECT
+    ap.Name,
+    ap.Race,
+    ap.MMR,
+    ap.WinPercent,
+    ap.MaxWS,
+    ap.MaxLS,
+    ap.RatingMax,
+    COALESCE(ls.MMR, ap.MMR)       AS CurrentMMR,
+    ap.MMR                          AS PrevMMR,
+    COALESCE(ls.MMR - ap.MMR, 0)   AS Change
+FROM AllParticipants ap
+LEFT JOIN LadderStaging ls ON ap.LLID = ls.LLID
+ORDER BY COALESCE(ls.MMR, ap.MMR) DESC;
+"@)
+
+if ($allTracked.Count -gt 0) {
+    # Build fixed-width table so columns align in Discord code block
+    $header = '{0,-16} {1,-8} {2,5} {3,7} {4,7} {5,5} {6,5} {7,9} {8,10}' -f `
+        'Name','Race','MMR','PrevMMR','Change','MaxWS','MaxLS','RatingMax','WinPercent'
+    $divider = '-' * $header.Length
+
+    $rows = $allTracked | ForEach-Object {
+        $changeStr = if ([int]$_.Change -gt 0) { "+$($_.Change)" } `
+                     elseif ([int]$_.Change -lt 0) { "$($_.Change)" } `
+                     else { '-' }
+        '{0,-16} {1,-8} {2,5} {3,7} {4,7} {5,5} {6,5} {7,9} {8,10}' -f `
+            $_.Name, $_.Race, $_.CurrentMMR, $_.PrevMMR, $changeStr,
+            $_.MaxWS, $_.MaxLS, $_.RatingMax, $_.WinPercent
+    }
+
+    $tableText  = "``````$($header)`n$($divider)`n$($rows -join "`n")``````"
+    $netChange  = ($allTracked | Measure-Object -Property Change -Sum).Sum
+    $boardColor = if ([int]$netChange -ge 0) { 5763719 } else { 15548997 }
+
+    Send-DiscordEmbed -WebhookUrl $webhookUrl `
+        -Title "$eBarChart Daily Ladder Report - $date" `
+        -Description $tableText `
+        -Color $boardColor
+} else {
+    Send-DiscordEmbed -WebhookUrl $webhookUrl `
+        -Title "$eBarChart Daily Ladder Report - $date" `
+        -Description "No players tracked yet. Have players register with /register." `
+        -Color 9807270
+}
+
+Start-Sleep -Milliseconds 500
+
+# ── Embed 2: Flavor text (gainer, loser, ATH, tilt, league changes, weekly) ──
+$embedFields  = [System.Collections.Generic.List[object]]::new()
+$flavorColor  = 9807270   # default grey - overridden below if players played today
 
 if ($playedOnly.Count -gt 0) {
     $winner     = $playedOnly[0]
@@ -924,24 +978,14 @@ if ($playedOnly.Count -gt 0) {
     $winnerMsg | Out-File -Encoding utf8 "$dataRoot/MMR/DailyWinner/winner_$date.txt"
     $loserMsg  | Out-File -Encoding utf8 "$dataRoot/MMR/DailyLoser/bigLoser_$date.txt"
 
-    $boardText = ($playedOnly | ForEach-Object {
-        $arrow     = if ([int]$_.Change -gt 0) { $eArrowUp } elseif ([int]$_.Change -lt 0) { $eArrowDown } else { $eArrowRight }
-        $changeStr = if ([int]$_.Change -gt 0) { "+$($_.Change)" } else { "$($_.Change)" }
-        $league    = Get-League ([int]$_.MMR)
-        "$arrow **$($_.Name)** ($($_.Race)) $($league.Emoji) - $changeStr MMR | W%: $($_.WinPercent)"
-    }) -join "`n"
-
-    $netChange  = ($playedOnly | Measure-Object -Property Change -Sum).Sum
-    $embedColor = if ([int]$netChange -ge 0) { 5763719 } else { 15548997 }
-
     $embedFields.Add(@{ name = "$eTrophy Biggest Gainer"; value = $winnerMsg; inline = $false })
     $embedFields.Add(@{ name = "$eSkull Biggest Loser";   value = $loserMsg;  inline = $false })
+    $flavorColor = if ([int]($playedOnly | Measure-Object -Property Change -Sum).Sum -ge 0) { 5763719 } else { 15548997 }
 } else {
-    $boardText  = "No ladder activity detected today. Get in the games, people."
-    $embedColor = 9807270
+    $flavorColor = 9807270
 }
 
-# Skipped players
+# Skipped players - show Name (Race) instead of raw LLID
 if ($skippedPlayers.Count -gt 0) {
     $skipText = $skippedPlayers -join "`n"
     $embedFields.Add(@{ name = "$eWarning Skipped ($($skippedPlayers.Count))"; value = $skipText; inline = $false })
@@ -955,10 +999,17 @@ if ($athLines.Count -gt 0) {
     $embedFields.Add(@{ name = "$eTrophy New All-Time Highs"; value = ($athLines -join "`n"); inline = $false })
 }
 
-# Tilt alerts
-$tiltLines = @($apiResponses | Where-Object { $_.TiltStreak -ge $tiltThreshold } | ForEach-Object {
-    Get-TiltMessage -Name $_.Name -Streak $_.TiltStreak
-})
+# Tilt alerts - deduplicate by player name so multi-race players only appear once,
+# using the highest tilt streak across all their registrations
+$tiltLines = @(
+    $apiResponses |
+    Where-Object { $_.TiltStreak -ge $tiltThreshold } |
+    Group-Object -Property Name |
+    ForEach-Object {
+        $worst = $_.Group | Sort-Object TiltStreak -Descending | Select-Object -First 1
+        Get-TiltMessage -Name $worst.Name -Streak $worst.TiltStreak
+    }
+)
 if ($tiltLines.Count -gt 0) {
     $embedFields.Add(@{ name = "$eSiren Tilt Watch"; value = ($tiltLines -join "`n"); inline = $false })
 }
@@ -1029,11 +1080,14 @@ ORDER BY WeeklyChange DESC;
     }
 }
 
-Send-DiscordEmbed -WebhookUrl $webhookUrl `
-    -Title "$eBarChart Daily Ladder Report - $date" `
-    -Description $boardText `
-    -Color $embedColor `
-    -Fields @($embedFields.ToArray())
+# Only send flavor embed if there's something worth saying
+if ($embedFields.Count -gt 0) {
+    Send-DiscordEmbed -WebhookUrl $webhookUrl `
+        -Title "$eBarChart Session Highlights - $date" `
+        -Description '' `
+        -Color $flavorColor `
+        -Fields @($embedFields.ToArray())
+}
 #endregion
 
 #region -- Static Webpage -------------------------------------------------------
