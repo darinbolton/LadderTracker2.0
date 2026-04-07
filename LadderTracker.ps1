@@ -1151,7 +1151,8 @@ ORDER BY WeeklyChange DESC;
         }) -join "`n"
     }
 
-    $weeklySection = if ($weeklyRows.Count -gt 0) { @"
+    if ($weeklyRows.Count -gt 0) {
+        $weeklySection = @"
         <h2>Weekly Standings</h2>
         <table>
             <thead>
@@ -1167,7 +1168,10 @@ ORDER BY WeeklyChange DESC;
                 $weeklyTableRows
             </tbody>
         </table>
-"@ } else { '' }
+"@
+    } else {
+        $weeklySection = ''
+    }
 
     # Alert sections
     $athSection = ''
