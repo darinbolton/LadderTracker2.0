@@ -4,6 +4,8 @@ services:
     image: mcr.microsoft.com/mssql/server:2022-latest
     container_name: laddertracker-sql
     restart: unless-stopped
+    networks:
+      - default
     environment:
       ACCEPT_EULA: "Y"
       SA_PASSWORD: ${SA_PASSWORD}
@@ -16,6 +18,9 @@ services:
       timeout: 5s
       retries: 12
       start_period: 30s
+    labels:
+      logging: "promtail"
+      logging_jobname: "laddertracker"
 
   laddertracker:
     image: laddertracker-app:latest
@@ -25,6 +30,8 @@ services:
     depends_on:
       sqlserver:
         condition: service_healthy
+    networks:
+      - default
     environment:
       SQL_SERVER: sqlserver
       DISCORD_WEBHOOK: ${DISCORD_WEBHOOK}
@@ -36,6 +43,9 @@ services:
       MATCH_LIMIT: ${MATCH_LIMIT}
     volumes:
       - /opt/laddertracker2.0/data:/data
+    labels:
+      logging: "promtail"
+      logging_jobname: "laddertracker"
 
   bot:
     image: laddertracker-bot:latest
@@ -45,6 +55,8 @@ services:
     depends_on:
       sqlserver:
         condition: service_healthy
+    networks:
+      - default
     environment:
       SQL_SERVER: sqlserver
       DISCORD_TOKEN: ${DISCORD_TOKEN}
@@ -52,6 +64,9 @@ services:
       ADMIN_ROLE_NAME: ${ADMIN_ROLE_NAME}
       SQL_USER: ${SQL_USER}
       SQL_PASS: ${SQL_PASS}
+    labels:
+      logging: "promtail"
+      logging_jobname: "laddertracker"
 
   nginx:
     image: nginx:alpine
@@ -59,14 +74,28 @@ services:
     restart: unless-stopped
     ports:
       - "8090:80"
+    networks:
+      - default
+      - proxy
     volumes:
       - /opt/laddertracker2.0/data/web:/usr/share/nginx/html:ro
     labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.laddertracker-web.rule=Host(`ladder.notlobs.com`)"
-      - "traefik.http.routers.laddertracker-web.entrypoints=websecure"
-      - "traefik.http.routers.laddertracker-web.tls.certresolver=cloudflare"
-      - "traefik.http.services.laddertracker-web.loadbalancer.server.port=80"
+      logging: "promtail"
+      logging_jobname: "laddertracker"
+      traefik.enable: "true"
+      traefik.http.routers.laddertracker-web.rule: "Host(`ladder.notlobs.com`)"
+      traefik.http.routers.laddertracker-web.entrypoints: "websecure"
+      traefik.http.routers.laddertracker-web.tls.certresolver: "cloudflare"
+      traefik.http.services.laddertracker-web.loadbalancer.server.port: "80"
+      traefik.docker.network: "proxy"
+
+networks:
+  default:
+    # Internal stack network - SQL, app, and bot communicate here
+    name: laddertracker_internal
+  proxy:
+    # Traefik's external network - only nginx needs this for routing
+    external: true
 
 volumes:
   sqldata:

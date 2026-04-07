@@ -737,7 +737,8 @@ foreach ($row in $playerRows) {
 
         # Skip players with no recent activity - null ratingLast means 0 games in 7 days
         if ($null -eq $mmr.ratingLast) {
-            $skipName = (Invoke-SC2PulseApi "$baseUrl/character/$NephestID").name.Split('#')[0]
+            try { $skipName = (Invoke-SC2PulseApi "$baseUrl/character/$NephestID").name.Split('#')[0] }
+            catch { $skipName = $llid }
             Write-Warning "[$llid] No activity in last 7 days, skipping."
             $skippedPlayers.Add("$skipName ($race) - no games in 7 days")
             continue
@@ -931,14 +932,15 @@ if ($allTracked.Count -gt 0) {
         $changeStr = if ([int]$_.Change -gt 0)     { "+$($_.Change)" } `
                      elseif ([int]$_.Change -lt 0) { "$($_.Change)"  } `
                      else                           { '-'             }
-        $name = if ($_.Name.Length -gt 14) { $_.Name.Substring(0,13) + '~' } else { $_.Name }
+        $name    = [string]$_.Name
+        $name    = if ($name.Length -gt 14) { $name.Substring(0,13) + '~' } else { $name }
+        $race    = ([string]$_.Race).Substring(0, [Math]::Min(7, ([string]$_.Race).Length))
+        $mmr     = [string]$_.CurrentMMR
+        $winPct  = ([string]$_.WinPercent).Replace(' ','').Replace('%','') + '%'
+        $peak    = if ($_.RatingMax -is [DBNull] -or $null -eq $_.RatingMax) { 'N/A' } else { [string]$_.RatingMax }
+
         '{0,-15} {1,-8} {2,-5} {3,-7} {4,-6} {5,-5}' -f `
-            $name,
-            $_.Race.Substring(0, [Math]::Min(7, $_.Race.Length)),
-            $_.CurrentMMR,
-            $changeStr,
-            $_.WinPercent.Replace(' ','').Replace('%','') + '%',
-            $_.RatingMax
+            $name, $race, $mmr, $changeStr, $winPct, $peak
     }
 
     # Triple backticks must be on their own lines for Discord to render the code block
