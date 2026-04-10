@@ -904,38 +904,39 @@ JOIN LadderStaging ls ON ap.LLID = ls.LLID;
 
 #region -- Discord: Build and Send Daily Embeds ---------------------------------
 
-# ── Message 1: Plain text table (all tracked players, matches old script format)
+# ── Message 1: Plain text table (all tracked players, sorted by MMR) ──────────
 $allTracked = @(Invoke-Sqlcmd @sqlParams -Query @"
 SELECT
     ap.Name,
     ap.Race,
     ap.MMR,
     ap.WinPercent,
-    ap.MaxWS,
-    ap.MaxLS,
     ap.RatingMax,
-    COALESCE(ls.MMR, ap.MMR)       AS CurrentMMR,
-    ap.MMR                          AS PrevMMR,
-    COALESCE(ls.MMR - ap.MMR, 0)   AS Change
+    ap.LLID
 FROM AllParticipants ap
-LEFT JOIN LadderStaging ls ON ap.LLID = ls.LLID
-ORDER BY COALESCE(ls.MMR, ap.MMR) DESC;
+ORDER BY ap.MMR DESC;
 "@)
 
+# Build a change lookup from $playedOnly which already has the correct deltas
+$changeLookup = @{}
+foreach ($p in $playedOnly) {
+    $changeLookup[$p.LLID] = [int]$p.Change
+}
+
 if ($allTracked.Count -gt 0) {
-    # Slim column set - keeps the table narrow enough to fit Discord's embed width
     $header  = '{0,-15} {1,-8} {2,-5} {3,-7} {4,-6} {5,-5}' -f `
                'Player','Race','MMR','Change','Win%','Peak'
     $divider = '-' * 50
 
     $rows = $allTracked | ForEach-Object {
-        $changeStr = if ([int]$_.Change -gt 0)     { "+$($_.Change)" } `
-                     elseif ([int]$_.Change -lt 0) { "$($_.Change)"  } `
-                     else                           { '-'             }
+        $change    = if ($changeLookup.ContainsKey([string]$_.LLID)) { $changeLookup[[string]$_.LLID] } else { 0 }
+        $changeStr = if ($change -gt 0)     { "+$change" } `
+                     elseif ($change -lt 0) { "$change"  } `
+                     else                   { '-'        }
         $name    = [string]$_.Name
         $name    = if ($name.Length -gt 14) { $name.Substring(0,13) + '~' } else { $name }
         $race    = ([string]$_.Race).Substring(0, [Math]::Min(7, ([string]$_.Race).Length))
-        $mmr     = [string]$_.CurrentMMR
+        $mmr     = [string]$_.MMR
         $winPct  = ([string]$_.WinPercent).Replace(' ','').Replace('%','') + '%'
         $peak    = if ($_.RatingMax -is [DBNull] -or $null -eq $_.RatingMax) { 'N/A' } else { [string]$_.RatingMax }
 
@@ -943,9 +944,8 @@ if ($allTracked.Count -gt 0) {
             $name, $race, $mmr, $changeStr, $winPct, $peak
     }
 
-    # Triple backticks must be on their own lines for Discord to render the code block
     $tableText  = '```' + "`n$header`n$divider`n" + ($rows -join "`n") + "`n" + '```'
-    $netChange  = ($allTracked | Measure-Object -Property Change -Sum).Sum
+    $netChange  = ($changeLookup.Values | Measure-Object -Sum).Sum
     $boardColor = if ([int]$netChange -ge 0) { 5763719 } else { 15548997 }
 
     Send-DiscordEmbed -WebhookUrl $webhookUrl `
@@ -991,12 +991,6 @@ if ($playedOnly.Count -gt 0) {
     $flavorColor = if ([int]($playedOnly | Measure-Object -Property Change -Sum).Sum -ge 0) { 5763719 } else { 15548997 }
 } else {
     $flavorColor = 9807270
-}
-
-# Skipped players - show Name (Race) instead of raw LLID
-if ($skippedPlayers.Count -gt 0) {
-    $skipText = $skippedPlayers -join "`n"
-    $embedFields.Add(@{ name = "$eWarning Skipped ($($skippedPlayers.Count))"; value = $skipText; inline = $false })
 }
 
 # ATH alerts
