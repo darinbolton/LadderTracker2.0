@@ -733,9 +733,9 @@ foreach ($row in $playerRows) {
     $llid      = $row.LLID
 
     try {
-        # New SC2Pulse endpoint format - race is a query param, returns all races
-        # /api/character/summary/1v1?characterId={id}&depth={days}
-        $summaryAll = Invoke-SC2PulseApi "$baseUrl/character/summary/1v1?characterId=$NephestID&depth=7"
+        # SC2Pulse endpoint: /api/character/{id}/summary/1v1/{depth}
+        # Returns an array of all races - filter client-side to the registered race
+        $summaryAll = Invoke-SC2PulseApi "$baseUrl/character/$NephestID/summary/1v1/7"
         $mmr        = @($summaryAll | Where-Object { $_.race -eq $race }) | Select-Object -First 1
 
         # Skip players with no recent activity
@@ -750,8 +750,8 @@ foreach ($row in $playerRows) {
         $nameTrimmed = (Invoke-SC2PulseApi "$baseUrl/character/$NephestID").name.Split('#')[0]
         $totalGames  = ($summaryAll | Measure-Object -Property games -Sum).Sum
 
-        # ATH uses a longer depth window - same new endpoint format
-        $athAll = Invoke-SC2PulseApi "$baseUrl/character/summary/1v1?characterId=$NephestID&depth=5000"
+        # ATH uses a longer depth window
+        $athAll = Invoke-SC2PulseApi "$baseUrl/character/$NephestID/summary/1v1/5000"
         $athRow = @($athAll | Where-Object { $_.race -eq $race }) | Select-Object -First 1
         $athMMR = if ($athRow) { [int]$athRow.ratingMax } else { 0 }
 
