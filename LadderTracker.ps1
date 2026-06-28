@@ -733,27 +733,46 @@ foreach ($row in $playerRows) {
     $llid      = $row.LLID
 
     try {
-        # SC2Pulse endpoint: /api/character/{id}/summary/1v1/{depth}
-        # Returns an array of all races - filter client-side to the registered race
-        $summaryAll = Invoke-SC2PulseApi "$baseUrl/character/$NephestID/summary/1v1/7"
-        $mmr        = @($summaryAll | Where-Object { $_.race -eq $race }) | Select-Object -First 1
+        # SC2Pulse API v2.0.0.18: /api/character-teams replaces the old summary endpoint
+        # Returns per-season team records for this character+race combination
+        $teams = Invoke-SC2PulseApi "$baseUrl/character-teams?queue=LOTV_1V1&race=$race&limit=400&characterId=$NephestID"
 
-        # Skip players with no recent activity
-        if ($null -eq $mmr -or $null -eq $mmr.ratingLast) {
-            try { $skipName = (Invoke-SC2PulseApi "$baseUrl/character/$NephestID").name.Split('#')[0] }
-            catch { $skipName = $llid }
+        if (-not $teams -or @($teams).Count -eq 0) {
+            Write-Warning "[$llid] No team data returned, skipping."
+            $skippedPlayers.Add("$NephestID ($race) - no data")
+            continue
+        }
+
+        # Sort by season descending — highest season number = most recent
+        $sortedTeams = @($teams | Sort-Object { [int]$_.season } -Descending)
+        $mostRecent  = $sortedTeams[0]
+
+        # Activity check — skip if most recent season's lastPlayed > 7 days ago
+        $sevenDaysAgo = (Get-Date).ToUniversalTime().AddDays(-7)
+        $lastPlayedDt = [datetime]::Parse(
+            [string]$mostRecent.lastPlayed,
+            $null,
+            [System.Globalization.DateTimeStyles]::RoundtripKind
+        )
+
+        if ($lastPlayedDt -lt $sevenDaysAgo) {
+            $skipName = if ($mostRecent.members) { [string]$mostRecent.members[0].character.tag } else { $llid }
             Write-Warning "[$llid] No activity in last 7 days, skipping."
             $skippedPlayers.Add("$skipName ($race) - no games in 7 days")
             continue
         }
 
-        $nameTrimmed = (Invoke-SC2PulseApi "$baseUrl/character/$NephestID").name.Split('#')[0]
-        $totalGames  = ($summaryAll | Measure-Object -Property games -Sum).Sum
+        # Current MMR = most recent season rating
+        $currentMMR  = [int]$mostRecent.rating
 
-        # ATH uses a longer depth window
-        $athAll = Invoke-SC2PulseApi "$baseUrl/character/$NephestID/summary/1v1/5000"
-        $athRow = @($athAll | Where-Object { $_.race -eq $race }) | Select-Object -First 1
-        $athMMR = if ($athRow) { [int]$athRow.ratingMax } else { 0 }
+        # Name from team data — no extra API call needed
+        $nameTrimmed = [string]$mostRecent.members[0].character.tag
+
+        # Total games = current season wins + losses
+        $totalGames  = [int]$mostRecent.wins + [int]$mostRecent.losses
+
+        # ATH = peak rating across all returned seasons
+        $athMMR = [int]($teams | Measure-Object -Property rating -Maximum).Maximum
 
         $fullMatchResponse = Invoke-SC2PulseApi "$baseUrl/group/match?typeCursor=_1V1&mapCursor=0&regionCursor=$region&type=_1V1&limit=$matchLimit&characterId=$NephestID"
 
@@ -780,12 +799,12 @@ foreach ($row in $playerRows) {
             if ($match.decision -eq 'LOSS') { $tiltStreak++ } else { break }
         }
 
-        Write-Verbose "[$nameTrimmed | $race] MMR: $($mmr.ratingLast) | ATH: $athMMR | Tilt: $tiltStreak" -Verbose
+        Write-Verbose "[$nameTrimmed | $race] MMR: $currentMMR | ATH: $athMMR | Tilt: $tiltStreak" -Verbose
 
         $apiResponses.Add([PSCustomObject]@{
             Name       = $nameTrimmed
             Race       = $race
-            MMR        = $mmr.ratingLast
+            MMR        = $currentMMR
             Games      = $totalGames
             NephestID  = $NephestID
             MaxWS      = $winStreak
@@ -793,7 +812,7 @@ foreach ($row in $playerRows) {
             RatingMax  = $athMMR
             LLID       = $llid
             WinPercent = $winPercent
-            NewATH     = ($mmr.ratingLast -ge $athMMR)
+            NewATH     = ($currentMMR -ge $athMMR)
             TiltStreak = $tiltStreak
         })
 
